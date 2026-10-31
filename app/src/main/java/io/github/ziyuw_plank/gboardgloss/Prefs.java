@@ -15,4 +15,8 @@ public final class Prefs {
   public static final String WIFI_ONLY = "wifi_only";
   public static final String MT_STATUS = "mt_status";
   public static final String MT_STATUS_AT = "mt_status_at";
+  /** Apply GboardGloss's count limit to Gboard's clipboard history. */
+  public static final String CLIPBOARD_LIMIT_ENABLED = "clipboard_limit_enabled";
+  /** Maximum Gboard clipboard rows; pinned rows are never removed automatically. */
+  public static final String CLIPBOARD_LIMIT = "clipboard_limit";
 }

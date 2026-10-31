@@ -86,6 +86,22 @@ APP_BASE_NAME=${0##*/}
 # Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
 APP_HOME=$( cd "${APP_HOME:-./}" > /dev/null && pwd -P ) || exit
 
+# Keep the wrapper distribution and dependency cache inside this project.
+if [ -z "$GRADLE_USER_HOME" ] ; then
+    GRADLE_USER_HOME=$APP_HOME/.gradle-home
+    export GRADLE_USER_HOME
+fi
+
+# Prefer the project-local Android SDK when the caller has not selected one.
+if [ -z "$ANDROID_HOME" ] ; then
+    ANDROID_HOME=$APP_HOME/.android-sdk
+    export ANDROID_HOME
+fi
+if [ -z "$ANDROID_SDK_ROOT" ] ; then
+    ANDROID_SDK_ROOT=$ANDROID_HOME
+    export ANDROID_SDK_ROOT
+fi
+
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 

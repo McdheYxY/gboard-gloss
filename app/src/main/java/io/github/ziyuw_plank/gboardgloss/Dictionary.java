@@ -174,7 +174,7 @@ public final class Dictionary {
     g = g.trim();
     if (g.regionMatches(true, 0, "to ", 0, 3)) g = g.substring(3).trim();
     g = g.replaceAll("\\s*\\([^)]*\\)", "").trim();
-    return fitGlossToken(g, 24);
+    return g;
   }
 
   /**
@@ -323,7 +323,7 @@ public final class Dictionary {
       String b = stripTo(ss[1]);
       if (b != null && !b.equalsIgnoreCase(a) && a.length() + b.length() + 2 <= 22) a = a + "; " + b;
     }
-    return fitGlossToken(a, 24);
+    return a;
   }
 
   /** Idiom entries: several long descriptive senses (no infinitive head). */
@@ -591,11 +591,11 @@ public final class Dictionary {
   static String glossaryLookup(String word) {
     if (!glossaryLoaded || word == null) return null;
     String g = glossary.get(word);
-    if (g != null) return fitGlossToken(g, 28);
+    if (g != null) return g.trim();
     // Latin keys: try lowercase
     if (!word.isEmpty() && word.charAt(0) < 0x2E80) {
       g = glossary.get(word.toLowerCase(Locale.ROOT));
-      if (g != null) return fitGlossToken(g, 28);
+      if (g != null) return g.trim();
     }
     return null;
   }

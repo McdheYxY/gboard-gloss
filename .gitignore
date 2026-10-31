@@ -1,4 +1,6 @@
 .gradle/
+.gradle-home/
+.android-sdk/
 build/
 app/build/
 local.properties

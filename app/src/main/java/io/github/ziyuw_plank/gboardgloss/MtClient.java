@@ -82,6 +82,8 @@ public final class MtClient {
       View v = r.view.get();
       if (v == null || !r.text.equals(v.getTag(R.id.gloss_word))) return;
       v.setTag(R.id.gloss_text, Dictionary.fitGlossToken(g, 40));
+      v.setTag(R.id.gloss_commit, g);
+      Hook.updateTranslationLongPress(v);
       v.invalidate();
     });
   }

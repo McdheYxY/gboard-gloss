@@ -49,6 +49,30 @@ public class SettingsActivity extends Activity {
     bind(R.id.debug, Prefs.DEBUG, false);
     bind(R.id.mt, Prefs.MT, true);
     bind(R.id.wifi_only, Prefs.WIFI_ONLY, true);
+    bind(R.id.clipboard_limit_enabled, Prefs.CLIPBOARD_LIMIT_ENABLED, false);
+    MaterialSwitch clipLimitSwitch = findViewById(R.id.clipboard_limit_enabled);
+    android.widget.EditText clipLimitInput = findViewById(R.id.clipboard_limit_input);
+    android.widget.Button clipLimitApply = findViewById(R.id.clipboard_limit_apply);
+    clipLimitInput.setText(String.valueOf(sp.getInt(
+        Prefs.CLIPBOARD_LIMIT, ClipboardPolicy.DEFAULT_LIMIT)));
+    clipLimitInput.setEnabled(clipLimitSwitch.isChecked());
+    clipLimitApply.setEnabled(clipLimitSwitch.isChecked());
+    clipLimitSwitch.setOnCheckedChangeListener((v, checked) -> {
+      sp.edit().putBoolean(Prefs.CLIPBOARD_LIMIT_ENABLED, checked).apply();
+      clipLimitInput.setEnabled(checked);
+      clipLimitApply.setEnabled(checked);
+    });
+    clipLimitApply.setOnClickListener(v -> {
+      try {
+        int requested = Integer.parseInt(clipLimitInput.getText().toString().trim());
+        int limit = ClipboardPolicy.normalizeLimit(requested);
+        sp.edit().putInt(Prefs.CLIPBOARD_LIMIT, limit).apply();
+        clipLimitInput.setText(String.valueOf(limit));
+        Toast.makeText(this, "剪贴板上限已设为 " + limit + " 条", Toast.LENGTH_SHORT).show();
+      } catch (NumberFormatException e) {
+        Toast.makeText(this, "请输入 1–1000 之间的条数", Toast.LENGTH_SHORT).show();
+      }
+    });
     findViewById(R.id.mt_download).setOnClickListener(v -> downloadModels());
     android.widget.EditText in = findViewById(R.id.try_input);
     in.addTextChangedListener(new android.text.TextWatcher() {
@@ -59,15 +83,16 @@ public class SettingsActivity extends Activity {
 
     ChipGroup g = findViewById(R.id.langs);
     String[] n = getResources().getStringArray(R.array.langs);
+    String[] codes = getResources().getStringArray(R.array.lang_codes);
     String cur = sp.getString(Prefs.LANG, "en");
     for (int i = 0; i < n.length; i++) {
       Chip ch = new Chip(this);
       ch.setText(n[i]);
       ch.setCheckable(true);
-      ch.setTag(Dictionary.LANGS[i]);
+      ch.setTag(codes[i]);
       ch.setId(1000 + i);
       g.addView(ch);
-      if (Dictionary.LANGS[i].equals(cur)) ch.setChecked(true);
+      if (codes[i].equals(cur)) ch.setChecked(true);
     }
     g.setOnCheckedStateChangeListener((gr, ids) -> {
       if (!ids.isEmpty()) {
@@ -107,9 +132,14 @@ public class SettingsActivity extends Activity {
 
   java.util.LinkedHashSet<String> neededModels() {
     java.util.LinkedHashSet<String> s = new java.util.LinkedHashSet<>();
-    String t = sp.getString(Prefs.LANG, "en");
-    s.add(t);
-    for (String x : SRC) if (!x.equals(t)) s.add(x);
+    String mode = sp.getString(Prefs.LANG, "en");
+    if (LanguageMode.isAuto(mode)) {
+      s.add("zh");
+      s.add("en");
+    } else {
+      s.add(mode);
+    }
+    for (String x : SRC) if (!x.equals(mode)) s.add(x);
     s.remove("en"); // English ships with ML Kit
     return s;
   }
@@ -160,8 +190,8 @@ public class SettingsActivity extends Activity {
     TextView out = findViewById(R.id.try_out);
     pendingTry = () -> new Thread(() -> {
       String t = text.trim();
-      String tgt = sp.getString(Prefs.LANG, "en");
       String src = Dictionary.detectPrimary(t);
+      String tgt = LanguageMode.resolveTarget(sp.getString(Prefs.LANG, "en"), src);
       String dict = t.isEmpty() ? null : Dictionary.translate(getAssets()::open, t, tgt);
       String mt = null;
       if (src != null && !src.equals(tgt) && !t.isEmpty()) {
@@ -192,13 +222,16 @@ public class SettingsActivity extends Activity {
 
   void dict(String t) {
     Dictionary.Opener o = getAssets()::open;
-    StringBuilder sb = new StringBuilder("可用方向（→ " + t + "）：\n");
-    for (String s : Dictionary.LANGS) {
-      if (s.equals(t)) continue;
-      boolean direct = Dictionary.has(o, s, t);
-      boolean pivot = !direct && Dictionary.has(o, s, "en") && Dictionary.has(o, "en", t);
-      sb.append(s).append(" → ").append(t)
-          .append(direct ? "  直接词典" : pivot ? "  经英语中转" : "  无").append('\n');
+    StringBuilder sb;
+    if (LanguageMode.isAuto(t)) {
+      sb = new StringBuilder("可用方向（中英自动）：\n");
+      appendDict(sb, o, "zh", "en");
+      appendDict(sb, o, "en", "zh");
+    } else {
+      sb = new StringBuilder("可用方向（→ " + t + "）：\n");
+      for (String s : Dictionary.LANGS) {
+        if (!s.equals(t)) appendDict(sb, o, s, t);
+      }
     }
     if (sp.getBoolean(Prefs.ONLINE, false)) {
       sb.append("在线补全：开（耗电与流量略增）");
@@ -206,6 +239,13 @@ public class SettingsActivity extends Activity {
       sb.append("在线补全：关");
     }
     ((TextView) findViewById(R.id.dict)).setText(sb.toString().trim());
+  }
+
+  void appendDict(StringBuilder sb, Dictionary.Opener o, String src, String tgt) {
+    boolean direct = Dictionary.has(o, src, tgt);
+    boolean pivot = !direct && Dictionary.has(o, src, "en") && Dictionary.has(o, "en", tgt);
+    sb.append(src).append(" → ").append(tgt)
+        .append(direct ? "  直接词典" : pivot ? "  经英语中转" : "  无").append('\n');
   }
 
   @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {

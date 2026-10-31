@@ -32,6 +32,19 @@ public class UnitTest {
     eq(Grammar.fix("he go school"), "he goes school", "3sg");
     eq(Grammar.fix("can to go"), "can go", "modal to");
     eq(Grammar.fix("I need study"), "I need to study", "need+V");
+    // target selection
+    eq(LanguageMode.resolveTarget(LanguageMode.AUTO_ZH_EN, "zh"), "en", "auto zh to en");
+    eq(LanguageMode.resolveTarget(LanguageMode.AUTO_ZH_EN, "en"), "zh", "auto en to zh");
+    eq(LanguageMode.resolveTarget(LanguageMode.AUTO_ZH_EN, "ja"), "en", "auto other to en");
+    eq(LanguageMode.resolveTarget("ja", "zh"), "ja", "fixed target unchanged");
+    eq(LanguageMode.displayName(LanguageMode.AUTO_ZH_EN), "中英自动", "auto display name");
+    // clipboard retention
+    eq(ClipboardPolicy.normalizeLimit(0), 100, "invalid clipboard limit uses default");
+    eq(ClipboardPolicy.normalizeLimit(2000), 1000, "clipboard limit capped");
+    eq(ClipboardPolicy.deleteTarget(13, 10), 3, "clipboard delete target");
+    eq(ClipboardPolicy.deleteTarget(10, 10), 0, "clipboard at limit");
+    eq(ClipboardPolicy.isPinned(1), true, "pinned flag");
+    eq(ClipboardPolicy.isPinned(2), false, "unpinned flag");
     System.out.println(n - fail + "/" + n + " passed");
     if (fail > 0) System.exit(1);
   }

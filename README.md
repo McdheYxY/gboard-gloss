@@ -25,10 +25,12 @@
 ## 功能
 - 仅作用于 Gboard（`com.google.android.inputmethod.latin`）的 LSPosed 模块
 - 候选词下方叠加一行译词，只做绘制叠加，**不改变** Gboard 的选词、上屏和其他行为
+- 长按带译文的候选词，弹出气泡选择输入原文或完整译文
 - 自动识别源语言（按文字类型）
-- 目标语言：英、中、日、德、法、西、俄；无直接词典时经英语中转
+- 目标语言：中英自动（中文候选→英语，英文候选→中文）、英、中、日、德、法、西、俄；无直接词典时经英语中转
 - 单词：离线词典 + 领域词表；短语：端侧神经网络翻译（ML Kit）；可选在线补全（默认关）
 - Material You 控制中心：动态取色、深浅色、开关、语言、字号、词表导入
+- 可自定义 Gboard 剪贴板历史条数；超出上限时按时间删除最旧的未置顶记录
 - 注入成功提示：屏幕底部胶囊条，几秒后淡出
 - 调试模式，日志带 `[gloss]` 前缀
 
@@ -141,10 +143,15 @@ Stitching dictionary words together gives a pile of words, not a sentence: no gr
 ### Features
 - LSPosed module scoped to Gboard only (`com.google.android.inputmethod.latin`)
 - Translation gloss drawn under candidates; purely additive, **never changes** Gboard behavior
+- Long-press a translated candidate to choose between the original text and the complete
+  translation in a popup
 - Automatic source language detection (by script)
-- Targets: en, zh, ja, de, fr, es, ru, with English as pivot when needed
+- Targets: automatic zh↔en (Chinese candidates → English, English candidates → Chinese), en,
+  zh, ja, de, fr, es, ru, with English as pivot when needed
 - Words: offline dictionaries + domain glossary; phrases: on-device NMT (ML Kit); optional online fill-in (default off)
 - Material You control center: dynamic color, toggles, language, size, glossary import
+- Configurable Gboard clipboard-history count; the oldest unpinned entries are removed above
+  the limit
 - Injection banner that fades out
 - Debug mode with `[gloss]`-tagged logs
 

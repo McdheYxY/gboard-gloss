@@ -1,2 +1,26 @@
-<resources><string-array name="scope"><item>com.google.android.inputmethod.latin</item><item>android</item></string-array>
-<string-array name="langs"><item>English</item><item>中文</item><item>日本語</item><item>Deutsch</item><item>Français</item><item>Español</item><item>Русский</item></string-array></resources>
+<resources>
+  <string-array name="scope">
+    <item>com.google.android.inputmethod.latin</item>
+    <item>android</item>
+  </string-array>
+  <string-array name="langs">
+    <item>中英自动</item>
+    <item>English</item>
+    <item>中文</item>
+    <item>日本語</item>
+    <item>Deutsch</item>
+    <item>Français</item>
+    <item>Español</item>
+    <item>Русский</item>
+  </string-array>
+  <string-array name="lang_codes">
+    <item>auto_zh_en</item>
+    <item>en</item>
+    <item>zh</item>
+    <item>ja</item>
+    <item>de</item>
+    <item>fr</item>
+    <item>es</item>
+    <item>ru</item>
+  </string-array>
+</resources>

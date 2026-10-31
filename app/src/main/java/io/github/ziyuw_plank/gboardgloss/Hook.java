@@ -1,8 +1,12 @@
 package io.github.ziyuw_plank.gboardgloss;
 
 import android.app.Application;
+import android.content.ContentProvider;
+import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.res.Configuration;
+import android.database.Cursor;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
 import android.graphics.Paint;
@@ -11,12 +15,17 @@ import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.inputmethodservice.InputMethodService;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.view.MotionEvent;
+import android.view.InputEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.EditorInfo;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -24,7 +33,10 @@ import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -47,6 +59,7 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
   static final String ME = "io.github.ziyuw_plank.gboardgloss";
   static final String SOFTKEY = "com.google.android.libraries.inputmethod.widgets.SoftKeyView";
   static final String SOFTKEY_DEF = "com.google.android.libraries.inputmethod.metadata.SoftKeyDef";
+  static final int REMOVE_SUGGESTION_ACTION = -10031;
 
   static String modulePath;
   static XSharedPreferences prefs;
@@ -59,10 +72,12 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
   static int logBudget = 40;
   static long lastReload;
   static int lastSize = -1;
-  static boolean lastNight;
   static float lastDensity = -1;
   static final Set<Class<?>> hookedIme = new HashSet<>();
+  static final Set<Method> hookedLongHandlers = new HashSet<>();
   static String lastUserGlossary;
+  static final ThreadLocal<Boolean> CLIPBOARD_CLEANING = new ThreadLocal<>();
+  static volatile WeakReference<InputMethodService> activeIme = new WeakReference<>(null);
 
   static final Dictionary.Opener OPENER = Hook::openAsset;
 
@@ -142,9 +157,16 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     } catch (Throwable t) { log("hook fail Application.onCreate " + t); }
 
     try {
+      installClipboardLimit(lp.classLoader);
+    } catch (Throwable t) {
+      log("clipboard limit hook failed " + t);
+    }
+
+    try {
       XposedHelpers.findAndHookMethod(InputMethodService.class, "onCreate", new XC_MethodHook() {
         @Override protected void afterHookedMethod(MethodHookParam p) {
           try {
+            activeIme = new WeakReference<>((InputMethodService) p.thisObject);
             log("IME onCreate: " + p.thisObject.getClass().getName());
             hookImeClass(p.thisObject.getClass());
           } catch (Throwable t) { log("ime.onCreate " + t); }
@@ -153,6 +175,86 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
       log("hook installed: InputMethodService.onCreate");
     } catch (Throwable t) { log("hook fail IMS.onCreate " + t); }
 
+    try {
+      XposedHelpers.findAndHookMethod(InputMethodService.class, "onStartInputView",
+          EditorInfo.class, boolean.class, new XC_MethodHook() {
+            @Override protected void afterHookedMethod(MethodHookParam p) {
+              InputMethodService ims = (InputMethodService) p.thisObject;
+              activeIme = new WeakReference<>(ims);
+              new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                try {
+                  if (ims.getWindow() == null) return;
+                  CandidatePopup.prepareTheme(ims.getWindow().getWindow().getDecorView());
+                } catch (Throwable t) { log("theme prewarm " + t); }
+              }, 200);
+            }
+          });
+      log("hook installed: InputMethodService.onStartInputView theme prewarm");
+    } catch (Throwable t) { log("hook fail IMS.onStartInputView " + t); }
+
+    try {
+      XposedHelpers.findAndHookMethod(View.class, "performLongClick", new XC_MethodHook() {
+        @Override protected void beforeHookedMethod(MethodHookParam p) {
+          try {
+            if (showTranslationChoices((View) p.thisObject)) p.setResult(true);
+          } catch (Throwable t) {
+            log("long-press translation " + t);
+          }
+        }
+      });
+      log("hook installed: View.performLongClick translation");
+    } catch (Throwable t) {
+      log("hook fail View.performLongClick " + t);
+    }
+
+    try {
+      XposedHelpers.findAndHookMethod(View.class, "dispatchTouchEvent",
+          MotionEvent.class, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam p) {
+              Object self = p.thisObject;
+              try {
+                MotionEvent event = (MotionEvent) p.args[0];
+                if (CandidateTouchWatcher.observeGlobal(event)) {
+                  p.setResult(true);
+                  return;
+                }
+                if (softKeyCls == null || !softKeyCls.isInstance(self)) return;
+                View candidate = (View) self;
+                boolean fired = CandidateTouchWatcher.handle(candidate, event);
+                if (fired) p.setResult(true);
+              } catch (Throwable t) {
+                log("candidate dispatch touch " + t);
+              }
+            }
+          });
+      log("hook installed: SoftKeyView.dispatchTouchEvent long-press");
+    } catch (Throwable t) {
+      log("hook fail SoftKeyView.dispatchTouchEvent " + t);
+    }
+
+    try {
+      XposedHelpers.findAndHookMethod(ViewGroup.class, "dispatchTouchEvent",
+          MotionEvent.class, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam p) {
+              try {
+                MotionEvent event = (MotionEvent) p.args[0];
+                if (CandidateTouchWatcher.observeGlobal(event)) p.setResult(true);
+              } catch (Throwable t) {
+                log("view group dispatch touch " + t);
+              }
+            }
+          });
+      log("hook installed: ViewGroup.dispatchTouchEvent long-press");
+    } catch (Throwable t) {
+      log("hook fail ViewGroup.dispatchTouchEvent " + t);
+    }
+
+    try {
+      hookViewRootInput(lp.classLoader);
+    } catch (Throwable t) {
+      log("hook fail ViewRootImpl input " + t);
+    }
+
     if (softKeyCls != null) {
       softKeyDefField = findSoftKeyDefField(softKeyCls);
       if (softKeyDefField != null) {
@@ -160,6 +262,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
       }
       int n = hookSoftKeyBindMethods(softKeyCls, lp.classLoader);
       log("SoftKeyView bind hooks installed=" + n);
+      try {
+        hookSoftKeyLongPress(softKeyCls, lp.classLoader);
+      } catch (Throwable t) {
+        log("hook fail SoftKeyView long-press " + t);
+      }
     }
 
     try {
@@ -184,6 +291,282 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
       });
       log("hook installed: ViewGroup.dispatchDraw (SoftKeyView-filtered)");
     } catch (Throwable t) { log("hook fail dispatchDraw " + t); }
+  }
+
+  static void hookSoftKeyLongPress(Class<?> softKey, ClassLoader cl) {
+    int installed = 0;
+    for (Method method : softKey.getDeclaredMethods()) {
+      if (!method.getName().equals("n") || method.getReturnType() != void.class
+          || method.getParameterTypes().length != 1) continue;
+      XC_MethodHook hook = new XC_MethodHook() {
+        @Override protected void afterHookedMethod(MethodHookParam p) {
+          try {
+            hookLongPressHandler(p.args[0]);
+          } catch (Throwable t) {
+            log("long-press handler setup " + t);
+          }
+        }
+      };
+      XposedBridge.hookMethod(method, hook);
+      installed++;
+    }
+    log("hook installed: SoftKeyView long-press handlers=" + installed);
+
+    try {
+      Class<?> candidateTouch = XposedHelpers.findClass("nsv", cl);
+      XposedHelpers.findAndHookMethod(candidateTouch, "hE",
+          softKey, MotionEvent.class, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam p) {
+              try {
+                View candidate = (View) p.args[0];
+                MotionEvent event = (MotionEvent) p.args[1];
+                boolean fired = CandidateTouchWatcher.handle(candidate, event);
+                if (fired) p.setResult(true);
+              } catch (Throwable t) {
+                log("candidate touch " + t);
+              }
+            }
+          });
+      log("hook installed: candidate touch long-press");
+    } catch (Throwable t) {
+      log("hook fail candidate touch long-press " + t);
+    }
+
+    try {
+      Class<?> suggestionLongClick = XposedHelpers.findClass("fzi", cl);
+      XposedHelpers.findAndHookMethod(suggestionLongClick, "onLongClick",
+          View.class, new XC_MethodHook() {
+            @Override protected void beforeHookedMethod(MethodHookParam p) {
+              try {
+                if (showTranslationChoices((View) p.args[0])) p.setResult(true);
+              } catch (Throwable t) {
+                log("suggestion long-click " + t);
+              }
+            }
+          });
+      log("hook installed: Gboard suggestion long-click");
+    } catch (Throwable t) {
+      log("hook fail Gboard suggestion long-click " + t);
+    }
+  }
+
+  static void hookViewRootInput(ClassLoader cl) {
+    Class<?> viewRoot = XposedHelpers.findClass("android.view.ViewRootImpl", cl);
+    int installed = 0;
+    for (Method method : viewRoot.getDeclaredMethods()) {
+      if (!method.getName().equals("dispatchInputEvent")
+          || method.getParameterTypes().length != 1) continue;
+      XposedBridge.hookMethod(method, new XC_MethodHook() {
+        @Override protected void beforeHookedMethod(MethodHookParam p) {
+          if (!(p.args[0] instanceof MotionEvent)) return;
+          try {
+            if (CandidateTouchWatcher.observeGlobal((MotionEvent) p.args[0])
+                && ((Method) p.method).getReturnType() == int.class) {
+              p.setResult(2); // InputStage.FINISH_HANDLED
+            }
+          } catch (Throwable t) {
+            log("view root touch " + t);
+          }
+        }
+      });
+      installed++;
+    }
+    log("hook installed: ViewRootImpl input handlers=" + installed);
+  }
+
+  static void hookLongPressHandler(Object handler) {
+    if (handler == null || softKeyCls == null) return;
+    for (Class<?> c = handler.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+      for (Method method : c.getDeclaredMethods()) {
+        if (!method.getName().equals("hD") || method.getParameterTypes().length != 1
+            || method.getParameterTypes()[0] != softKeyCls) continue;
+        if (!hookedLongHandlers.add(method)) return;
+        XposedBridge.hookMethod(method, new XC_MethodHook() {
+          @Override protected void beforeHookedMethod(MethodHookParam p) {
+            try {
+              if (showTranslationChoices((View) p.args[0])) p.setResult(true);
+            } catch (Throwable t) {
+              log("long-press handler " + t);
+            }
+          }
+        });
+        log("hook installed: Gboard long-press handler " + c.getName());
+        return;
+      }
+    }
+  }
+
+  static boolean showTranslationChoices(View v) {
+    View candidate = findSoftKeyAncestor(v);
+    if (candidate == null) return false;
+    Object originalValue = candidate.getTag(R.id.gloss_word);
+    Object translationValue = candidate.getTag(R.id.gloss_commit);
+    if (!(originalValue instanceof String) || ((String) originalValue).isEmpty()
+        || !(translationValue instanceof String) || ((String) translationValue).isEmpty()) {
+      if (prefs.getBoolean(Prefs.DEBUG, false)) log("long-press candidate has no translation");
+      return false;
+    }
+    prefs.reload();
+    if (!prefs.getBoolean(Prefs.ENABLED, true)) return false;
+    InputMethodService ims = activeIme.get();
+    InputConnection input = ims == null ? null : ims.getCurrentInputConnection();
+    if (input == null) return false;
+    String original = (String) originalValue;
+    String translation = (String) translationValue;
+    if (Boolean.TRUE.equals(candidate.getTag(R.id.gloss_popup_open))) return true;
+    stripNativeDeleteAction(candidate.getTag(R.id.gloss_soft_key_def));
+    CandidatePopup.show(v, original, translation, choice -> {
+      try {
+        input.commitText(choice, 1);
+        log("long-press committed chars=" + choice.length()
+            + " translated=" + choice.equals(translation));
+        return true;
+      } catch (Throwable t) {
+        log("long-press commit " + t);
+        return false;
+      }
+    }, () -> candidate.setTag(R.id.gloss_popup_open, null));
+    candidate.setTag(R.id.gloss_popup_open, true);
+    log("long-press choices shown");
+    return true;
+  }
+
+  static View findSoftKeyAncestor(View v) {
+    if (softKeyCls == null) return null;
+    if (softKeyCls.isInstance(v)) return v;
+    for (ViewParent p = v.getParent(); p instanceof View; p = p.getParent()) {
+      if (softKeyCls.isInstance(p)) return (View) p;
+    }
+    return null;
+  }
+
+  static void updateTranslationLongPress(View v) {
+    Object value = v.getTag(R.id.gloss_commit);
+    boolean available = value instanceof String && !((String) value).isEmpty();
+    boolean ours = Boolean.TRUE.equals(v.getTag(R.id.gloss_long_click_ours));
+    if (available) {
+      if (!ours) {
+        v.setTag(R.id.gloss_long_click_original, v.isLongClickable());
+        v.setTag(R.id.gloss_long_click_ours, true);
+      }
+      v.setLongClickable(true);
+    } else if (ours) {
+      Object original = v.getTag(R.id.gloss_long_click_original);
+      v.setLongClickable(original instanceof Boolean && (Boolean) original);
+      v.setTag(R.id.gloss_long_click_original, null);
+      v.setTag(R.id.gloss_long_click_ours, null);
+    }
+  }
+
+  static void stripNativeDeleteAction(Object softKeyDef) {
+    if (softKeyDef == null) return;
+    try {
+      Object[] actionDefs = (Object[]) XposedHelpers.getObjectField(softKeyDef, "f");
+      if (actionDefs == null || actionDefs.length == 0) return;
+      ArrayList<Object> kept = new ArrayList<>();
+      boolean removed = false;
+      for (Object actionDef : actionDefs) {
+        Object[] actions = (Object[]) XposedHelpers.getObjectField(actionDef, "d");
+        boolean deleteAction = false;
+        if (actions != null) {
+          for (Object action : actions) {
+            if (XposedHelpers.getIntField(action, "c") == REMOVE_SUGGESTION_ACTION) {
+              deleteAction = true;
+              break;
+            }
+          }
+        }
+        if (deleteAction) removed = true;
+        else kept.add(actionDef);
+      }
+      if (!removed) return;
+      Object filtered = java.lang.reflect.Array.newInstance(
+          actionDefs.getClass().getComponentType(), kept.size());
+      for (int i = 0; i < kept.size(); i++) {
+        java.lang.reflect.Array.set(filtered, i, kept.get(i));
+      }
+      XposedHelpers.setObjectField(softKeyDef, "f", filtered);
+    } catch (Throwable t) {
+      log("remove native delete action failed " + t);
+    }
+  }
+
+  static void installClipboardLimit(ClassLoader cl) {
+    Class<?> provider = XposedHelpers.findClass(
+        "com.google.android.apps.inputmethod.libs.clipboard.ClipboardContentProvider", cl);
+    XC_MethodHook afterWrite = new XC_MethodHook() {
+      @Override protected void afterHookedMethod(MethodHookParam p) {
+        try {
+          enforceClipboardLimit((ContentProvider) p.thisObject, (Uri) p.args[0]);
+        } catch (Throwable t) {
+          log("clipboard limit insert " + t);
+        }
+      }
+    };
+    XC_MethodHook beforeRead = new XC_MethodHook() {
+      @Override protected void beforeHookedMethod(MethodHookParam p) {
+        try {
+          enforceClipboardLimit((ContentProvider) p.thisObject, (Uri) p.args[0]);
+        } catch (Throwable t) {
+          log("clipboard limit query " + t);
+        }
+      }
+    };
+    XposedHelpers.findAndHookMethod(provider, "insert",
+        Uri.class, ContentValues.class, afterWrite);
+    XposedHelpers.findAndHookMethod(provider, "query",
+        Uri.class, String[].class, String.class, String[].class, String.class, beforeRead);
+    log("hook installed: ClipboardContentProvider limit");
+  }
+
+  static void enforceClipboardLimit(ContentProvider provider, Uri uri) {
+    if (provider == null || uri == null || !isClipsUri(uri)) return;
+    if (Boolean.TRUE.equals(CLIPBOARD_CLEANING.get())) return;
+    prefs.reload();
+    if (!prefs.getBoolean(Prefs.CLIPBOARD_LIMIT_ENABLED, false)) return;
+
+    int limit = ClipboardPolicy.normalizeLimit(
+        prefs.getInt(Prefs.CLIPBOARD_LIMIT, ClipboardPolicy.DEFAULT_LIMIT));
+    CLIPBOARD_CLEANING.set(true);
+    Cursor c = null;
+    try {
+      c = provider.query(uri, new String[]{"_id", "item_type"},
+          null, null, "timestamp ASC");
+      if (c == null) return;
+      int total = c.getCount();
+      int need = ClipboardPolicy.deleteTarget(total, limit);
+      if (need <= 0) return;
+
+      int idCol = c.getColumnIndexOrThrow("_id");
+      int typeCol = c.getColumnIndexOrThrow("item_type");
+      List<Long> ids = new ArrayList<>(need);
+      while (c.moveToNext() && ids.size() < need) {
+        if (!ClipboardPolicy.isPinned(c.getInt(typeCol))) ids.add(c.getLong(idCol));
+      }
+      c.close();
+      c = null;
+
+      int removed = 0;
+      for (Long id : ids) {
+        try {
+          if (provider.delete(ContentUris.withAppendedId(uri, id), null, null) > 0) removed++;
+        } catch (Throwable t) {
+          log("clipboard delete " + id + " " + t);
+        }
+      }
+      if (removed > 0) log("clipboard limit=" + limit + " total=" + total + " removed=" + removed);
+    } catch (Throwable t) {
+      log("clipboard limit enforce " + t);
+    } finally {
+      if (c != null) try { c.close(); } catch (Throwable ignored) {}
+      CLIPBOARD_CLEANING.remove();
+    }
+  }
+
+  static boolean isClipsUri(Uri uri) {
+    List<String> segments = uri.getPathSegments();
+    return "content".equals(uri.getScheme()) && segments != null && !segments.isEmpty()
+        && "clips".equals(segments.get(segments.size() - 1));
   }
 
   static void reloadGlossary() {
@@ -241,7 +624,8 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
           }
           @Override public void draw(Canvas c) {
             Rect b = getBounds();
-            String s = "✓ GboardGloss · " + prefs.getString(Prefs.LANG, "en");
+            String s = "✓ GboardGloss · "
+                + LanguageMode.displayName(prefs.getString(Prefs.LANG, "en"));
             float w = tx.measureText(s) + 28 * d, h = 28 * d;
             float cx = b.width() / 2f, y = b.height() - h - 4 * d;
             c.drawRoundRect(cx - w / 2, y, cx + w / 2, y + h, h / 2, h / 2, bg);
@@ -486,7 +870,8 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
       return;
     }
     if (!resolveIsCandidate(v)) {
-      if (v.getTag(R.id.gloss_text) != null) clearGloss(v);
+      if (v.getTag(R.id.gloss_text) != null
+          || v.getTag(R.id.gloss_soft_key_def) != null) clearGloss(v);
       return;
     }
     String word = extractLabel(v, softKeyDef);
@@ -494,16 +879,18 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
       clearGloss(v);
       return;
     }
+    v.setTag(R.id.gloss_soft_key_def, softKeyDef);
     Object prev = v.getTag(R.id.gloss_word);
     if (word.equals(prev)) return;
 
     v.setTag(R.id.gloss_word, word);
-    String lang = prefs.getString(Prefs.LANG, "en");
-    String gloss = Dictionary.translate(OPENER, word, lang);
-    gloss = Dictionary.fitGlossToken(gloss, 22);
-    v.setTag(R.id.gloss_text, gloss);
-
     String src0 = Dictionary.detectPrimary(word);
+    String lang = LanguageMode.resolveTarget(prefs.getString(Prefs.LANG, "en"), src0);
+    String fullGloss = Dictionary.translate(OPENER, word, lang);
+    String gloss = Dictionary.fitGlossToken(fullGloss, 22);
+    v.setTag(R.id.gloss_text, gloss);
+    v.setTag(R.id.gloss_commit, fullGloss);
+
     // Candidate #1: neural MT is primary (dictionary gloss above is the instant fallback until MT answers,
     // or if MT is off / unavailable / times out). Candidates #2+: dictionary first; MT only when the
     // dictionary has no confident result (miss, or a stitched phrase).
@@ -511,7 +898,11 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     boolean needMt = first || gloss == null || Dictionary.wasComposed(word, lang);
     if (needMt && src0 != null && !src0.equals(lang) && prefs.getBoolean(Prefs.MT, true)) {
       String hit = MtClient.peek(word, lang);
-      if (hit != null) { v.setTag(R.id.gloss_text, Dictionary.fitGlossToken(hit, 40)); gloss = hit; }
+      if (hit != null) {
+        v.setTag(R.id.gloss_text, Dictionary.fitGlossToken(hit, 40));
+        v.setTag(R.id.gloss_commit, hit);
+        gloss = hit;
+      }
       else MtClient.request(v.getContext(), v, word, src0, lang);
     }
 
@@ -522,6 +913,7 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if (peek != null) {
           if (!peek.isEmpty()) {
             v.setTag(R.id.gloss_text, Dictionary.fitGlossToken(peek, 22));
+            v.setTag(R.id.gloss_commit, peek);
           }
         } else {
           final String expect = word;
@@ -530,6 +922,8 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
               if (!expect.equals(v.getTag(R.id.gloss_word))) return;
               if (g != null && !g.isEmpty()) {
                 v.setTag(R.id.gloss_text, Dictionary.fitGlossToken(g, 22));
+                v.setTag(R.id.gloss_commit, g);
+                updateTranslationLongPress(v);
                 v.invalidate();
               }
             } catch (Throwable t) { log("online cb " + t); }
@@ -540,20 +934,32 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     if (logBudget > 0 || prefs.getBoolean(Prefs.DEBUG, false)) {
       if (logBudget > 0) logBudget--;
-      log("bind '" + word + "' → " + v.getTag(R.id.gloss_text));
+      log("bind '" + word + "' (" + src0 + "→" + lang + ") → " + v.getTag(R.id.gloss_text));
     }
+    Object commit = v.getTag(R.id.gloss_commit);
+    if (commit instanceof String && !((String) commit).isEmpty()) {
+      stripNativeDeleteAction(softKeyDef);
+    }
+    updateTranslationLongPress(v);
     v.invalidate();
   }
 
   static void clearGloss(View v) {
-    if (v.getTag(R.id.gloss_text) != null || v.getTag(R.id.gloss_word) != null) {
+    if (v.getTag(R.id.gloss_text) != null || v.getTag(R.id.gloss_word) != null
+        || v.getTag(R.id.gloss_commit) != null
+        || v.getTag(R.id.gloss_soft_key_def) != null
+        || Boolean.TRUE.equals(v.getTag(R.id.gloss_long_click_ours))) {
       v.setTag(R.id.gloss_word, null);
       v.setTag(R.id.gloss_text, null);
+      v.setTag(R.id.gloss_commit, null);
+      v.setTag(R.id.gloss_soft_key_def, null);
+      updateTranslationLongPress(v);
+      CandidateTouchWatcher.clear(v);
       v.invalidate();
     }
   }
 
-  /** Soft secondary label: ~60% alpha, theme grey, slight tracking, 1 line. */
+  /** Soft secondary label derived from Gboard's themed candidate text. */
   static void drawCachedGloss(View v, Canvas c) {
     Object g = v.getTag(R.id.gloss_text);
     if (!(g instanceof String)) return;
@@ -574,20 +980,17 @@ public class Hook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     // Shrink further on short keys
     if (h < 32 * d) textPx = Math.min(textPx, 9f * sd);
 
-    boolean night = (v.getResources().getConfiguration().uiMode
-        & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
-    if (!paintInit || size != lastSize || night != lastNight || d != lastDensity) {
+    if (!paintInit || size != lastSize || d != lastDensity) {
       paintInit = true;
       lastSize = size;
-      lastNight = night;
       lastDensity = d;
       paint.setTextAlign(Paint.Align.CENTER);
       paint.setTypeface(Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL));
       paint.setLetterSpacing(0.04f);
       paint.setFakeBoldText(false);
-      // Soft secondary (~60%): follow Gboard-like on-surface variant, not loud amber
-      paint.setColor(night ? 0x99E8EAED : 0x99607078);
     }
+    int primary = CandidatePopup.candidateTextColor(v);
+    paint.setColor(CandidatePopup.secondaryTextColor(primary));
     paint.setTextSize(textPx);
 
     float maxW = Math.max(8f, v.getWidth() - 6f * d);

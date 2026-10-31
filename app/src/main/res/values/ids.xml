@@ -3,4 +3,15 @@
   <item name="gloss_is_candidate" type="id"/>
   <item name="gloss_word" type="id"/>
   <item name="gloss_text" type="id"/>
+  <item name="gloss_commit" type="id"/>
+  <item name="gloss_soft_key_def" type="id"/>
+  <item name="gloss_long_click_original" type="id"/>
+  <item name="gloss_long_click_ours" type="id"/>
+  <item name="gloss_long_press_task" type="id"/>
+  <item name="gloss_long_press_fired" type="id"/>
+  <item name="gloss_popup_open" type="id"/>
+  <item name="gloss_touch_down_x" type="id"/>
+  <item name="gloss_touch_down_y" type="id"/>
+  <item name="gloss_touch_event_time" type="id"/>
+  <item name="gloss_touch_event_action" type="id"/>
 </resources>
